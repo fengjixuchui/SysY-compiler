@@ -6,6 +6,7 @@
 #include <utility>
 #include "log.h"
 #include "mem.h"
+#include "position.h"
 #include "lexer.h"
 
 // 由于我们需要从语法分析器的头文件中得到所有token值
@@ -17,6 +18,8 @@ struct Pattern {
     const std::string regex;
     const std::function<std::optional<int>(std::string)> callback;
 
+    static std::string fixGroup(const std::string &pattern);
+
     Pattern(
             const std::string &pattern,
             std::function<std::optional<int>(std::string)> callback
@@ -24,7 +27,7 @@ struct Pattern {
 };
 
 // 查找前面不是斜杠的括号，替换成非捕获组
-static std::string fixGroup(const std::string &pattern) {
+std::string Pattern::fixGroup(const std::string &pattern) {
     std::string dummyPattern = "Z" + pattern;
     std::string fixedPattern;
     fixedPattern.reserve(pattern.length());
@@ -43,13 +46,27 @@ Pattern::Pattern(const std::string &pattern,
         : regex(fixGroup(pattern)), callback(std::move(callback)) {}
 
 // 记录行号，列号
-static size_t currLine = 1;
+static size_t currRow = 1;
 static size_t currCol = 1;
 
 // 包含patterns数组
 // getToken函数通过从上到下遍历patterns数组，匹配第一个匹配的pattern
 // 然后调用其对应的callback，获得token的类型
 #include "lexer_pattern.inc"
+
+void Lexer::changeRowCol(const std::string &str, size_t &row, size_t &col) {
+    // 计算新行号
+    size_t newLineCount = std::count_if(str.begin(), str.end(),
+                                        [](char c) { return c == '\n'; });
+    row += newLineCount;
+
+    // 计算新列号
+    if (size_t lastNewLinePos = str.find_last_of('\n'); lastNewLinePos != std::string::npos) {
+        col = str.length() - lastNewLinePos;
+    } else {
+        col += str.length();
+    }
+}
 
 // https://stackoverflow.com/questions/34229328/writing-a-very-simple-lexical-analyser-in-c
 std::optional<int> Lexer::getToken() {
@@ -59,7 +76,7 @@ std::optional<int> Lexer::getToken() {
     std::call_once(onceFlag, [this] {
         // 按序合并所有正则表达式
         std::string regexMerge;
-        for (const auto &pattern: patterns) {
+        for (const Pattern &pattern: patterns) {
             regexMerge += "(" + pattern.regex + ")|";
         }
         // 去除最后一个竖线
@@ -78,8 +95,10 @@ std::optional<int> Lexer::getToken() {
     for (int i = 0; i < it->size(); i++) {
         if ((*it)[i + 1].matched) {
             std::string str = (*it)[i + 1].str();
+            std::optional<int> token = patterns[i].callback(str);
+            changeRowCol(str, currRow, currCol);
             it++;
-            if (auto token = patterns[i].callback(str)) {
+            if (token) {
                 return token;
             }
             goto retry;
@@ -87,9 +106,22 @@ std::optional<int> Lexer::getToken() {
     }
 
     // 无法匹配任何pattern
-    return std::nullopt;
+    throw std::logic_error("unknown token exception not handled");
 }
 
+void Lexer::log(const std::string &token, const std::string &lexeme, void *ptr) {
+    auto &stream = ::log("lexer");
+    stream << std::setw(20) << token <<
+           std::setw(20) << lexeme <<
+           std::setw(10) << currRow <<
+           std::setw(10) << currCol;
+    if (ptr) {
+        stream << std::setw(20) << ptr;
+    }
+    stream << std::endl;
+}
+
+// 被yyparse调用
 int yylex() {
     static std::string s(std::istreambuf_iterator(std::cin), {});
     static Lexer lexer{s};
@@ -105,8 +137,8 @@ int yylex() {
                      std::endl;
     });
 
-    if (auto token = lexer.getToken()) {
+    if (std::optional<int> token = lexer.getToken()) {
         return *token;
     }
-    return YYEOF;
+    return 0;
 }

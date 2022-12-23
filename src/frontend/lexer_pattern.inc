@@ -8,240 +8,175 @@
 #define P_VALUE_FLOAT_HEX       R"(0[Xx]((([0-9A-Fa-f]*\.[0-9A-Fa-f]+)|([0-9A-Fa-f]+\.))([Pp][+-]?\d+)|[0-9A-Fa-f]+([Pp][+-]?\d+)))"
 #define P_VALUE_FLOAT           "(" P_VALUE_FLOAT_DEC ")|(" P_VALUE_FLOAT_HEX ")"
 
-inline static void lexerLog(
-        const std::string &token,
-        const std::string &lexeme = "",
-        void *ptr = nullptr
-) {
-    auto &stream = log("lexer");
-    stream << std::setw(20) << token <<
-           std::setw(20) << lexeme <<
-           std::setw(10) << currLine <<
-           std::setw(10) << currCol;
-    if (ptr) {
-        stream << std::setw(20) << ptr;
-    }
-    stream << std::endl;
-}
-
 #define T_CALLBACK [](const std::string &str) -> std::optional<int>
 
 static Pattern patterns[]{
         {P_NEWLINE,       T_CALLBACK {
-            currLine++;
-            currCol = 1;
             return std::nullopt;
         }},
         {P_WHITESPACE,    T_CALLBACK {
-            currCol += str.length();
             return std::nullopt;
         }},
         {P_BLOCK_COMMENT, T_CALLBACK {
-            lexerLog("BLOCK_COMMENT");
-            size_t newLineCount = std::count_if(
-                    str.begin(),
-                    str.end(),
-                    [](char c) { return c == '\n'; }
-            );
-            if (newLineCount > 0) {
-                currLine += newLineCount;
-                currCol = 1;
-            } else {
-                currCol += str.length();
-            }
+            Lexer::log("BLOCK_COMMENT");
             return std::nullopt;
         }},
         {P_LINE_COMMENT,  T_CALLBACK {
-            lexerLog("LINE_COMMENT");
-            currLine++;
-            currCol = 1;
+            Lexer::log("LINE_COMMENT");
             return std::nullopt;
         }},
 
         {R"(const\b)",    T_CALLBACK {
-            lexerLog("CONST", str);
-            currCol += str.length();
+            Lexer::log("CONST", str);
             return CONST;
         }},
 
         {R"(int\b)",      T_CALLBACK {
-            lexerLog("TYPE_INT", str);
-            currCol += str.length();
+            Lexer::log("TYPE_INT", str);
             return TYPE_INT;
         }},
         {R"(float\b)",    T_CALLBACK {
-            lexerLog("TYPE_FLOAT", str);
-            currCol += str.length();
+            Lexer::log("TYPE_FLOAT", str);
             return TYPE_FLOAT;
         }},
         {R"(void\b)",     T_CALLBACK {
-            lexerLog("TYPE_VOID", str);
-            currCol += str.length();
+            Lexer::log("TYPE_VOID", str);
             return TYPE_VOID;
         }},
         {R"(if\b)",       T_CALLBACK {
-            lexerLog("IF", str);
-            currCol += str.length();
+            Lexer::log("IF", str);
             return IF;
         }},
         {R"(else\b)",     T_CALLBACK {
-            lexerLog("ELSE", str);
-            currCol += str.length();
+            Lexer::log("ELSE", str);
             return ELSE;
         }},
         {R"(while\b)",    T_CALLBACK {
-            lexerLog("WHILE", str);
-            currCol += str.length();
+            Lexer::log("WHILE", str);
             return WHILE;
         }},
         {R"(break\b)",    T_CALLBACK {
-            lexerLog("BREAK", str);
-            currCol += str.length();
+            Lexer::log("BREAK", str);
             return BREAK;
         }},
         {R"(continue\b)", T_CALLBACK {
-            lexerLog("CONTINUE", str);
-            currCol += str.length();
+            Lexer::log("CONTINUE", str);
             return CONTINUE;
         }},
         {R"(return\b)",   T_CALLBACK {
-            lexerLog("RETURN", str);
-            currCol += str.length();
+            Lexer::log("RETURN", str);
             return RETURN;
         }},
 
         {"&&",            T_CALLBACK {
-            lexerLog("AND", str);
-            currCol += str.length();
+            Lexer::log("AND", str);
             return AND;
         }},
         {R"(\|\|)",       T_CALLBACK {
-            lexerLog("OR", str);
-            currCol += str.length();
+            Lexer::log("OR", str);
             return OR;
         }},
         {"<=",            T_CALLBACK {
-            lexerLog("LE", str);
-            currCol += str.length();
+            Lexer::log("LE", str);
             return LE;
         }},
         {">=",            T_CALLBACK {
-            lexerLog("GE", str);
-            currCol += str.length();
+            Lexer::log("GE", str);
             return GE;
         }},
         {"==",            T_CALLBACK {
-            lexerLog("EQ", str);
-            currCol += str.length();
+            Lexer::log("EQ", str);
             return EQ;
         }},
         {"!=",            T_CALLBACK {
-            lexerLog("NE", str);
-            currCol += str.length();
+            Lexer::log("NE", str);
             return NE;
         }},
         {"<",             T_CALLBACK {
-            lexerLog("LT", str);
-            currCol += str.length();
+            Lexer::log("LT", str);
             return LT;
         }},
         {">",             T_CALLBACK {
-            lexerLog("GT", str);
-            currCol += str.length();
+            Lexer::log("GT", str);
             return GT;
         }},
         {R"(\+)",         T_CALLBACK {
-            lexerLog("ADD", str);
-            currCol += str.length();
+            Lexer::log("ADD", str);
             return PLUS;
         }},
         {"-",             T_CALLBACK {
-            lexerLog("SUB", str);
-            currCol += str.length();
+            Lexer::log("SUB", str);
             return MINUS;
         }},
         {"!",             T_CALLBACK {
-            lexerLog("NOT", str);
-            currCol += str.length();
+            Lexer::log("NOT", str);
             return NOT;
         }},
         {R"(\*)",         T_CALLBACK {
-            lexerLog("MUL", str);
-            currCol += str.length();
+            Lexer::log("MUL", str);
             return MUL;
         }},
         {R"(\/)",         T_CALLBACK {
-            lexerLog("DIV", str);
-            currCol += str.length();
+            Lexer::log("DIV", str);
             return DIV;
         }},
         {"%",             T_CALLBACK {
-            lexerLog("MOD", str);
-            currCol += str.length();
+            Lexer::log("MOD", str);
             return MOD;
         }},
         {"=",             T_CALLBACK {
-            lexerLog("ASSIGN", str);
-            currCol += str.length();
+            Lexer::log("ASSIGN", str);
             return ASSIGN;
         }},
         {",",             T_CALLBACK {
-            lexerLog("COMMA", str);
-            currCol += str.length();
+            Lexer::log("COMMA", str);
             return COMMA;
         }},
         {";",             T_CALLBACK {
-            lexerLog("SEMICOLON", str);
-            currCol += str.length();
+            Lexer::log("SEMICOLON", str);
             return SEMICOLON;
         }},
         {R"(\{)",         T_CALLBACK {
-            lexerLog("LBRACE", str);
-            currCol += str.length();
+            Lexer::log("LBRACE", str);
             return LBRACE;
         }},
         {R"(\})",         T_CALLBACK {
-            lexerLog("RBRACE", str);
-            currCol += str.length();
+            Lexer::log("RBRACE", str);
             return RBRACE;
         }},
         {R"(\[)",         T_CALLBACK {
-            lexerLog("LBRACKET", str);
-            currCol += str.length();
+            Lexer::log("LBRACKET", str);
             return LBRACKET;
         }},
         {R"(\])",         T_CALLBACK {
-            lexerLog("RBRACKET", str);
-            currCol += str.length();
+            Lexer::log("RBRACKET", str);
             return RBRACKET;
         }},
         {R"(\()",         T_CALLBACK {
-            lexerLog("LPAREN", str);
-            currCol += str.length();
+            Lexer::log("LPAREN", str);
             return LPAREN;
         }},
         {R"(\))",         T_CALLBACK {
-            lexerLog("RPAREN", str);
-            currCol += str.length();
+            Lexer::log("RPAREN", str);
             return RPAREN;
         }},
 
         {P_VALUE_FLOAT,   T_CALLBACK {
             yylval.floatType = std::stof(str);
-            lexerLog("VALUE_FLOAT", str);
-            currCol += str.length();
+            Lexer::log("VALUE_FLOAT", str);
             return VALUE_FLOAT;
         }},
         {P_VALUE_INT,     T_CALLBACK {
             yylval.intType = std::stoul(str, nullptr, 0);
-            lexerLog("VALUE_INT", str);
-            currCol += str.length();
+            Lexer::log("VALUE_INT", str);
             return VALUE_INT;
         }},
         {P_IDENTIFIER,    T_CALLBACK {
-            yylval.strType = Memory::make<std::string>(str);
-            lexerLog("IDENTIFIER", str);
-            currCol += str.length();
+            yylval.strType = WithPosition(
+                    Memory::make<std::string>(str),
+                    {currRow, currCol}
+            );
+            Lexer::log("IDENTIFIER", str);
             return IDENTIFIER;
         }},
 
@@ -249,7 +184,7 @@ static Pattern patterns[]{
         {".+",            T_CALLBACK {
             throw std::runtime_error(
                     "Unknown token: " + str + "at " +
-                    std::to_string(currLine) + ":" + std::to_string(currCol)
+                    std::to_string(currRow) + ":" + std::to_string(currCol)
             );
         }}
 };

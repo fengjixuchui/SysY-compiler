@@ -7,222 +7,15 @@
 #include "lib.h"
 #include "IR.h"
 #include "AST.h"
+#include "code_gen_helper.h"
 
-////////////////////////////////////////////////////////////////////////////////
-// helper函数
-
-static std::tuple<llvm::Value *, Typename>
-unaryExprTypeFix(llvm::Value *value, Typename minType, Typename maxType) {
-    Typename type = TypeSystem::fromValue(value);
-
-    // 获得该节点的计算类型
-    Typename calcType = static_cast<Typename>(std::clamp(
-            static_cast<int>(type),
-            static_cast<int>(minType),
-            static_cast<int>(maxType)
-    ));
-
-    // 按需进行类型转换
-    if (type != calcType) {
-        value = TypeSystem::cast(value, calcType);
-    }
-
-    // 返回转换结果、计算类型
-    return {value, calcType};
-}
-
-inline static llvm::Value *
-unaryExprTypeFix(llvm::Value *value, Typename wantType) {
-    return std::get<0>(unaryExprTypeFix(value, wantType, wantType));
-}
-
-static std::tuple<llvm::Value *, llvm::Value *, Typename>
-binaryExprTypeFix(llvm::Value *L, llvm::Value *R, Typename minType, Typename maxType) {
-    // 获得左右子树类型
-    Typename LType = TypeSystem::fromValue(L);
-    Typename RType = TypeSystem::fromValue(R);
-
-    // 获得该节点的计算类型
-    Typename calcType;
-
-    // 取max是因为在Typename中编号按照类型优先级排列，越大优先级越高
-    // 对于每个二元运算，我们希望类型向高处转换，保证计算精度
-    calcType = static_cast<Typename>(std::max(
-            static_cast<int>(LType),
-            static_cast<int>(RType)
-    ));
-
-    calcType = static_cast<Typename>(std::clamp(
-            static_cast<int>(calcType),
-            static_cast<int>(minType),
-            static_cast<int>(maxType)
-    ));
-
-    // 按需进行类型转换
-    if (LType != calcType) {
-        L = TypeSystem::cast(L, calcType);
-    }
-    if (RType != calcType) {
-        R = TypeSystem::cast(R, calcType);
-    }
-
-    // 返回转换结果、计算类型
-    return {L, R, calcType};
-}
-
-inline static std::tuple<llvm::Value *, llvm::Value *>
-binaryExprTypeFix(llvm::Value *L, llvm::Value *R, Typename wantType) {
-    auto [LFixed, RFixed, calcType] =
-            binaryExprTypeFix(L, R, wantType, wantType);
-    return {LFixed, RFixed};
-}
-
-static std::vector<std::optional<int>>
-convertArraySize(std::vector<AST::Expr *> &size) {
-    std::vector<std::optional<int>> result;
-    for (auto s: size) {
-        // 处理空指针
-        if (!s) {
-            result.emplace_back(std::nullopt);
-            continue;
-        }
-
-        // 常量求值阶段可确保数组维度的合法性，因此dynamic_cast不会返回空指针，并且一定是>=0的整型常数
-        auto pNumber = dynamic_cast<AST::NumberExpr *>(s);
-        result.emplace_back(std::get<int>(pNumber->value));
-    }
-    return result;
-}
-
-static llvm::Constant *
-constantInitValConvert(AST::InitializerElement *initializerElement, llvm::Type *type) {
-    // 递归出口
-    if (std::holds_alternative<AST::Expr *>(initializerElement->element)) {
-        return llvm::cast<llvm::Constant>(
-                std::get<AST::Expr *>(initializerElement->element)->codeGen()
-        );
-    }
-
-    auto initializerList = std::get<AST::InitializerList *>(
-            initializerElement->element
-    );
-
-    std::vector<llvm::Constant *> initVals;
-
-    // 递归将InitializerList转换为llvm::Constant
-    for (auto element: initializerList->elements) {
-        auto initVal = constantInitValConvert(
-                element,
-                type->getArrayElementType()
-        );
-        initVals.emplace_back(initVal);
-    }
-
-    return llvm::ConstantArray::get(
-            llvm::cast<llvm::ArrayType>(type),
-            initVals
-    );
-}
-
-static std::vector<llvm::Value *>
-getGEPIndices(const std::vector<int> &indices) {
-    std::vector<llvm::Value *> GEPIndices;
-    GEPIndices.emplace_back(
-            llvm::ConstantInt::get(llvm::Type::getInt32Ty(IR::ctx.llvmCtx), 0)
-    );
-    for (int index: indices) {
-        GEPIndices.emplace_back(
-                llvm::ConstantInt::get(llvm::Type::getInt32Ty(IR::ctx.llvmCtx), index)
-        );
-    }
-    return GEPIndices;
-}
-
-static void dynamicInitValCodeGen(
-        llvm::Value *alloca,
-        AST::InitializerElement *initializerElement,
-        const std::vector<int> &indices = {}
-) {
-    if (std::holds_alternative<AST::Expr *>(initializerElement->element)) {
-        auto val = std::get<AST::Expr *>(initializerElement->element)->codeGen();
-        auto var = IR::ctx.builder.CreateGEP(
-                alloca->getType()->getPointerElementType(),
-                alloca,
-                getGEPIndices(indices)
-        );
-        // 普通数组初值隐式类型转换
-        Typename wantType = TypeSystem::fromType(var->getType()->getPointerElementType());
-        val = unaryExprTypeFix(val, wantType);
-        IR::ctx.builder.CreateStore(val, var);
-        return;
-    }
-
-    auto initializerList = std::get<AST::InitializerList *>(
-            initializerElement->element
-    );
-
-    std::vector<int> nextIndices = indices;
-    for (int i = 0; i < initializerList->elements.size(); i++) {
-        nextIndices.emplace_back(i);
-
-        dynamicInitValCodeGen(
-                alloca,
-                initializerList->elements[i],
-                nextIndices
-        );
-
-        nextIndices.pop_back();
-    }
-}
-
-static llvm::Value *
-getVariablePointer(const std::string &name, const std::vector<AST::Expr *> &size) {
-    llvm::Value *var = IR::ctx.symbolTable.lookup(name);
-
-    // 计算维度
-    std::vector<llvm::Value *> indices;
-    for (auto s: size) {
-        indices.emplace_back(s->codeGen());
-    }
-
-    // 寻址
-    for (auto index: indices) {
-        if (var->getType()->getPointerElementType()->isPointerTy()) {
-            var = IR::ctx.builder.CreateLoad(
-                    var->getType()->getPointerElementType(),
-                    var
-            );
-            var = IR::ctx.builder.CreateGEP(
-                    var->getType()->getPointerElementType(),
-                    var,
-                    index
-            );
-        } else {
-            var = IR::ctx.builder.CreateGEP(
-                    var->getType()->getPointerElementType(),
-                    var,
-                    {
-                            llvm::ConstantInt::get(
-                                    llvm::Type::getInt32Ty(IR::ctx.llvmCtx),
-                                    0
-                            ),
-                            index
-                    }
-            );
-        }
-    }
-    return var;
-}
-
-
-////////////////////////////////////////////////////////////////////////////////
-// IR生成函数
+using namespace CodeGenHelper;
 
 llvm::Value *AST::CompileUnit::codeGen() {
     // 在编译的初始阶段添加SysY系统函数原型
     addLibraryPrototype();
 
-    for (auto compileElement: compileElements) {
+    for (Base* compileElement: compileElements) {
         compileElement->codeGen();
     }
     return nullptr;
@@ -230,11 +23,11 @@ llvm::Value *AST::CompileUnit::codeGen() {
 
 llvm::Value *AST::ConstVariableDecl::codeGen() {
     // 常量均存储在全局空间
-    for (auto def: constVariableDefs) {
+    for (ConstVariableDef* def: constVariableDefs) {
         // 确定常量名称，若为局部常量，则补充函数前缀
         std::string varName;
         if (IR::ctx.function) {
-            auto func = IR::ctx.builder.GetInsertBlock()->getParent();
+            llvm::Function* func = IR::ctx.builder.GetInsertBlock()->getParent();
             varName = func->getName().str() + "." + def->name;
         } else {
             varName = def->name;
@@ -267,9 +60,15 @@ llvm::Value *AST::VariableDecl::codeGen() {
     // 生成局部变量/全局变量
     if (IR::ctx.function) {
         // 局部变量
-        for (auto def: variableDefs) {
+        for (VariableDef *def: variableDefs) {
+            // 在函数头部使用alloca分配空间
+            llvm::IRBuilder<> entryBuilder(
+                    &IR::ctx.function->getEntryBlock(),
+                    IR::ctx.function->getEntryBlock().begin()
+            );
+
             // 生成局部变量
-            llvm::AllocaInst *alloca = IR::ctx.builder.CreateAlloca(
+            llvm::AllocaInst *alloca = entryBuilder.CreateAlloca(
                     TypeSystem::get(type, convertArraySize(def->size)),
                     nullptr,
                     def->name
@@ -285,7 +84,7 @@ llvm::Value *AST::VariableDecl::codeGen() {
         }
     } else {
         // 全局变量
-        for (auto def: variableDefs) {
+        for (VariableDef *def: variableDefs) {
             // 生成全局变量
             auto var = new llvm::GlobalVariable(
                     IR::ctx.module,
@@ -319,7 +118,7 @@ llvm::Value *AST::VariableDecl::codeGen() {
 }
 
 llvm::Value *AST::Block::codeGen() {
-    for (auto element: elements) {
+    for (Base *element: elements) {
         element->codeGen();
     }
     return nullptr;
@@ -328,7 +127,7 @@ llvm::Value *AST::Block::codeGen() {
 llvm::Value *AST::FunctionDef::codeGen() {
     // 计算参数类型
     std::vector<llvm::Type *> argTypes;
-    for (auto argument: arguments) {
+    for (FunctionArg *argument: arguments) {
         // 该函数对普通类型和数组均适用，因此不对类型进行区分
         argTypes.emplace_back(TypeSystem::get(
                 argument->type,
@@ -425,8 +224,8 @@ llvm::Value *AST::AssignStmt::codeGen() {
 
     // 获取变量类型
     // 注意：左值是变量的指针，需要获取其指向的类型
-    Typename lType = TypeSystem::fromType(lhs->getType()->getPointerElementType());
-    Typename rType = TypeSystem::fromValue(rhs);
+    Typename lType = TypeSystem::from(lhs->getType()->getPointerElementType());
+    Typename rType = TypeSystem::from(rhs);
 
     // 尝试进行隐式类型转换，失败则抛出异常
     if (lType != rType) {
@@ -452,7 +251,7 @@ llvm::Value *AST::ExprStmt::codeGen() {
 llvm::Value *AST::BlockStmt::codeGen() {
     // 块语句需要开启新一层作用域
     IR::ctx.symbolTable.push();
-    for (auto element: elements) {
+    for (Base *element: elements) {
         element->codeGen();
     }
     IR::ctx.symbolTable.pop();
@@ -558,7 +357,7 @@ llvm::Value *AST::WhileStmt::codeGen() {
     llvm::Value *value = condition->codeGen();
 
     // 隐式类型转换
-    Typename type = TypeSystem::fromValue(value);
+    Typename type = TypeSystem::from(value);
     if (type != Typename::BOOL) {
         value = TypeSystem::cast(value, Typename::BOOL);
     }
@@ -580,7 +379,7 @@ llvm::Value *AST::WhileStmt::codeGen() {
         IR::ctx.builder.CreateBr(conditionBB);
     }
 
-    // continue基本块
+    // 出了循环后的后继基本块
     function->getBasicBlockList().push_back(continueBB);
     IR::ctx.builder.SetInsertPoint(continueBB);
 
@@ -596,6 +395,7 @@ llvm::Value *AST::BreakStmt::codeGen() {
         return nullptr;
     }
 
+    // 无条件跳出循环，并清除原循环中的插入点
     IR::ctx.builder.CreateBr(IR::ctx.loops.top().breakBB);
 
     IR::ctx.builder.ClearInsertionPoint();
@@ -611,6 +411,7 @@ llvm::Value *AST::ContinueStmt::codeGen() {
         return nullptr;
     }
 
+    // 跳转执行下一次循环，并清除原循环中的插入点
     IR::ctx.builder.CreateBr(IR::ctx.loops.top().continueBB);
 
     IR::ctx.builder.ClearInsertionPoint();
@@ -626,7 +427,7 @@ llvm::Value *AST::ReturnStmt::codeGen() {
 
     if (expr) {
         // 返回值隐式类型转换
-        Typename wantType = TypeSystem::fromType(IR::ctx.function->getReturnType());
+        Typename wantType = TypeSystem::from(IR::ctx.function->getReturnType());
         llvm::Value *value = unaryExprTypeFix(expr->codeGen(), wantType);
         IR::ctx.builder.CreateRet(value);
     } else {
@@ -683,7 +484,7 @@ llvm::Value *AST::FunctionCallExpr::codeGen() {
 
     // 计算实参值
     std::vector<llvm::Value *> values;
-    for (auto param: params) {
+    for (Expr *param: params) {
         values.emplace_back(param->codeGen());
     }
 
@@ -692,8 +493,8 @@ llvm::Value *AST::FunctionCallExpr::codeGen() {
     for (const auto &argument : function->args()) {
         // 指针传参（用于数组）不进行隐式类型转换，普通变量才会进行隐式类型转换
         if (!argument.getType()->isPointerTy()) {
-            Typename wantType = TypeSystem::fromType(argument.getType());
-            Typename gotType = TypeSystem::fromValue(values[i]);
+            Typename wantType = TypeSystem::from(argument.getType());
+            Typename gotType = TypeSystem::from(values[i]);
             if (wantType != gotType) {
                 values[i] = TypeSystem::cast(values[i], wantType);
             }
@@ -822,7 +623,8 @@ llvm::Value *AST::BinaryExpr::codeGen() {
             );
 
             // 生成合并块的phi节点，将左右两侧的值传入
-            phi->addIncoming(L, incoming1);
+            // incoming1分支传入的值一定为false
+            phi->addIncoming(llvm::ConstantInt::getFalse(IR::ctx.llvmCtx), incoming1);
             phi->addIncoming(R, incoming2);
 
             return phi;
@@ -877,7 +679,8 @@ llvm::Value *AST::BinaryExpr::codeGen() {
             );
 
             // 生成合并块的phi节点，将左右两侧的值传入
-            phi->addIncoming(L, incoming1);
+            // incoming1分支传入的值一定为true
+            phi->addIncoming(llvm::ConstantInt::getTrue(IR::ctx.llvmCtx), incoming1);
             phi->addIncoming(R, incoming2);
 
             return phi;
